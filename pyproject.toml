@@ -24,7 +24,7 @@ classifiers = [
     "Topic :: Software Development :: Build Tools",
     "Topic :: Utilities",
 ]
-dependencies = []
+dependencies = ["packaging>=24"]
 
 [project.optional-dependencies]
 dev = [
