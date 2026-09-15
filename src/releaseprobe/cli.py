@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import logging
 import sys
 from typing import TextIO
 
@@ -24,6 +25,14 @@ def build_parser() -> argparse.ArgumentParser:
         description="Find release notes, URLs and metadata from container image labels and tags.",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="count",
+        default=0,
+        help="Increase log verbosity on stderr (-v for INFO, -vv for DEBUG); "
+        "useful for debugging a failed check remotely.",
+    )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -160,9 +169,23 @@ def _run_check(args: argparse.Namespace) -> int:
     return 0
 
 
+_VERBOSITY_LEVELS = (logging.WARNING, logging.INFO, logging.DEBUG)
+
+
+def _configure_logging(verbosity: int) -> None:
+    level = _VERBOSITY_LEVELS[min(verbosity, len(_VERBOSITY_LEVELS) - 1)]
+    logging.basicConfig(
+        level=level,
+        stream=sys.stderr,
+        format="%(levelname)s %(name)s: %(message)s",
+        force=True,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    _configure_logging(args.verbose)
 
     if args.command == "labels":
         return _run_labels(args)

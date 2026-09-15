@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from unittest.mock import patch
 
 from releaseprobe import __version__
@@ -19,6 +20,33 @@ def test_version_flag(capsys) -> None:
 
     assert exit_code == 0
     assert __version__ in capsys.readouterr().out
+
+
+def test_default_verbosity_is_warning(monkeypatch) -> None:
+    import io
+
+    monkeypatch.setattr("sys.stdin", io.StringIO("{}"))
+    main(["labels", "-"])
+
+    assert logging.getLogger().getEffectiveLevel() == logging.WARNING
+
+
+def test_verbose_flag_raises_log_level(monkeypatch) -> None:
+    import io
+
+    monkeypatch.setattr("sys.stdin", io.StringIO("{}"))
+    main(["-v", "labels", "-"])
+
+    assert logging.getLogger().getEffectiveLevel() == logging.INFO
+
+
+def test_double_verbose_flag_enables_debug_logging(monkeypatch) -> None:
+    import io
+
+    monkeypatch.setattr("sys.stdin", io.StringIO("{}"))
+    main(["-vv", "labels", "-"])
+
+    assert logging.getLogger().getEffectiveLevel() == logging.DEBUG
 
 
 def test_labels_prints_human_summary(tmp_path, capsys) -> None:

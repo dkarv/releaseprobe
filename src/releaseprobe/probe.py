@@ -9,10 +9,13 @@ https://docs.renovatebot.com/modules/datasource/docker/
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from releaseprobe import labels as label_keys
+
+_logger = logging.getLogger(__name__)
 
 
 def _first(labels: Mapping[str, str], keys: tuple[str, ...]) -> str | None:
@@ -42,9 +45,12 @@ class ReleaseInfo:
         return self.source or self.url or self.documentation
 
 
-def probe_labels(labels: Mapping[str, str]) -> ReleaseInfo:
+def probe_labels(
+    labels: Mapping[str, str], logger: logging.Logger | None = None
+) -> ReleaseInfo:
     """Extract release metadata from a mapping of container image labels."""
-    return ReleaseInfo(
+    log = logger or _logger
+    info = ReleaseInfo(
         version=_first(labels, label_keys.VERSION_KEYS),
         source=_first(labels, label_keys.SOURCE_KEYS),
         url=labels.get(label_keys.OCI_URL),
@@ -52,3 +58,9 @@ def probe_labels(labels: Mapping[str, str]) -> ReleaseInfo:
         revision=_first(labels, label_keys.REVISION_KEYS),
         raw_labels=dict(labels),
     )
+    log.debug(
+        "probed %d label(s): version=%s source=%s", len(labels), info.version, info.source
+    )
+    if info.version is None:
+        log.debug("no version label found among %s", label_keys.VERSION_KEYS)
+    return info

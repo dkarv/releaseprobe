@@ -43,6 +43,10 @@ If the image is already at the latest version, it says so and exits; add
 Set a `GITHUB_TOKEN` environment variable to avoid GitHub's low unauthenticated
 rate limit when checking images with many releases.
 
+Pass `-v` (INFO) or `-vv` (DEBUG) to log progress and diagnostics - registry
+and GitHub requests, version comparisons, label parsing - to stderr, useful
+when debugging a failed or unexpected check remotely.
+
 #### Floating tags (`:latest`, `:stable`, ...)
 
 A floating tag carries no version of its own, so there is nothing to compare
@@ -104,6 +108,19 @@ result.release_notes  # list[ReleaseNote], oldest first
 
 info = probe_labels({"org.opencontainers.image.source": "https://github.com/org/app"})
 info.release_notes_url()  # "https://github.com/org/app"
+```
+
+Every public function logs progress and diagnostics through the standard
+`logging` module, under logger names rooted at `releaseprobe` (e.g.
+`releaseprobe.registry`) - configure those as usual to see them. To route the
+logs elsewhere instead, e.g. into your own application's logging setup, pass
+a `logger`:
+
+```python
+import logging
+
+logger = logging.getLogger("myapp.releaseprobe")
+result = check_for_update("grafana/grafana:11.2.0", logger=logger)
 ```
 
 ## Development

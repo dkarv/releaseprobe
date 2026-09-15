@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from unittest.mock import patch
 
 import pytest
@@ -25,7 +26,7 @@ def test_check_for_update_finds_newer_version_and_notes() -> None:
     latest_labels = {"org.opencontainers.image.source": "https://github.com/org/app"}
     notes = [ReleaseNote(version="1.2.0", name="1.2.0", url="u", body="what changed")]
 
-    def fake_fetch_labels(ref: object) -> dict[str, str]:
+    def fake_fetch_labels(ref: object, **kwargs: object) -> dict[str, str]:
         return latest_labels if getattr(ref, "tag", None) == "1.2.0" else current_labels
 
     with (
@@ -38,9 +39,13 @@ def test_check_for_update_finds_newer_version_and_notes() -> None:
     assert result.has_update
     assert result.latest_version == "1.2.0"
     assert result.release_notes == notes
-    mock_notes.assert_called_once_with(
-        "https://github.com/org/app", current="1.0.0", latest="1.2.0", token=None
-    )
+    mock_notes.assert_called_once()
+    call_args, call_kwargs = mock_notes.call_args
+    assert call_args == ("https://github.com/org/app",)
+    assert call_kwargs["current"] == "1.0.0"
+    assert call_kwargs["latest"] == "1.2.0"
+    assert call_kwargs["token"] is None
+    assert isinstance(call_kwargs["logger"], logging.Logger)
 
 
 def test_check_for_update_skips_changelog_without_source() -> None:
@@ -83,9 +88,13 @@ def test_check_for_update_passes_github_token() -> None:
     ):
         check_for_update("ghcr.io/org/app:1.0.0", github_token="secret")
 
-    mock_notes.assert_called_once_with(
-        "https://github.com/org/app", current="1.0.0", latest="1.2.0", token="secret"
-    )
+    mock_notes.assert_called_once()
+    call_args, call_kwargs = mock_notes.call_args
+    assert call_args == ("https://github.com/org/app",)
+    assert call_kwargs["current"] == "1.0.0"
+    assert call_kwargs["latest"] == "1.2.0"
+    assert call_kwargs["token"] == "secret"
+    assert isinstance(call_kwargs["logger"], logging.Logger)
 
 
 def test_check_for_update_floating_tag_without_version_raises() -> None:
@@ -95,3 +104,27 @@ def test_check_for_update_floating_tag_without_version_raises() -> None:
     ):
         with pytest.raises(UnknownVersionError):
             check_for_update("ghcr.io/org/app:latest")
+
+
+def test_check_for_update_uses_custom_logger() -> None:
+    custom_logger = logging.getLogger("custom-test-logger")
+
+    with (
+        patch("releaseprobe.check.fetch_labels", return_value={}) as mock_fetch,
+        patch("releaseprobe.check.list_tags", return_value=["1.0.0"]) as mock_list,
+    ):
+        check_for_update("ghcr.io/org/app:1.0.0", logger=custom_logger)
+
+    assert mock_fetch.call_args.kwargs["logger"] is custom_logger
+    assert mock_list.call_args.kwargs["logger"] is custom_logger
+
+
+def test_check_for_update_defaults_to_module_logger(caplog) -> None:
+    with (
+        patch("releaseprobe.check.fetch_labels", return_value={}),
+        patch("releaseprobe.check.list_tags", return_value=["1.0.0"]),
+        caplog.at_level(logging.INFO, logger="releaseprobe.check"),
+    ):
+        check_for_update("ghcr.io/org/app:1.0.0")
+
+    assert any("already at the latest version" in message for message in caplog.messages)
