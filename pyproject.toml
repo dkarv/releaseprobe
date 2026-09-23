@@ -52,6 +52,7 @@ packages = ["src/releaseprobe"]
 [tool.pytest.ini_options]
 addopts = "--cov=releaseprobe --cov-report=term-missing"
 testpaths = ["tests"]
+markers = ["network: talks to real container registries and GitHub"]
 
 [tool.coverage.run]
 source = ["releaseprobe"]

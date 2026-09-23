@@ -1,0 +1,10 @@
+{
+    "com.docker.compose.container-number": "1",
+    "com.docker.compose.project": "netbird",
+    "com.docker.compose.version": "5.3.1",
+    "org.opencontainers.image.version": "24.04",
+    "com.docker.compose.service": "netbird-server",
+    "com.docker.compose.oneoff": "False",
+    "com.docker.compose.depends_on": "",
+    "com.docker.compose.replace": "netbird-server"
+}

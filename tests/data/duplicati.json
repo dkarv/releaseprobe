@@ -1,0 +1,15 @@
+{
+    "org.opencontainers.image.source": "https://github.com/linuxserver/docker-duplicati",
+    "org.opencontainers.image.version": "v2.4.0.0_stable_2026-09-03-ls309",
+    "org.opencontainers.image.ref.name": "778eea0104198011230cc194d7e8fa805a5d1577",
+    "org.opencontainers.image.revision": "778eea0104198011230cc194d7e8fa805a5d1577",
+    "org.opencontainers.image.created": "2026-09-19T08:21:28+00:00",
+    "org.opencontainers.image.url": "https://github.com/linuxserver/docker-duplicati/packages",
+    "org.opencontainers.image.documentation": "https://docs.linuxserver.io/images/docker-duplicati",
+    "org.opencontainers.image.title": "Duplicati",
+    "org.opencontainers.image.vendor": "linuxserver.io",
+    "org.opencontainers.image.authors": "linuxserver.io",
+    "org.opencontainers.image.licenses": "GPL-3.0-only",
+    "build_version": "Linuxserver.io version:- v2.4.0.0_stable_2026-09-03-ls309 Build-date:- 2026-09-19T08:21:28+00:00",
+    "maintainer": "aptalca"
+}
