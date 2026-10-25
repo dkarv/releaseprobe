@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import io
 import json
 from email.message import Message
 from unittest.mock import patch
+from urllib.error import HTTPError
 from urllib.request import Request
 
 from releaseprobe.changelog import fetch_release_notes, parse_github_repo
@@ -114,3 +116,52 @@ def test_fetch_release_notes_follows_pagination() -> None:
         )
 
     assert [n.version for n in notes] == ["v1.1.0", "v1.2.0"]
+
+
+def test_fetch_release_notes_stops_paging_at_current_version() -> None:
+    page_one = "https://api.github.com/repos/org/app/releases?per_page=100"
+    page_two = "https://api.github.com/repos/org/app/releases?per_page=100&page=2"
+    releases = [
+        {"tag_name": "v1.2.0", "name": None, "html_url": "u2", "body": "two"},
+        {"tag_name": "v1.1.0", "name": None, "html_url": "u1", "body": "one"},
+        {"tag_name": "v1.0.0", "name": None, "html_url": "u0", "body": "zero"},
+    ]
+    calls: list[str] = []
+
+    def fake_urlopen(request: Request, timeout: int = 10) -> FakeResponse:
+        calls.append(request.full_url)
+        if request.full_url == page_one:
+            return FakeResponse(
+                json.dumps(releases).encode(), {"Link": f'<{page_two}>; rel="next"'}
+            )
+        raise AssertionError(f"unexpected URL {request.full_url}")
+
+    with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        notes = fetch_release_notes(
+            "https://github.com/org/app", current="1.0.0", latest="1.2.0"
+        )
+
+    assert calls == [page_one]
+    assert [n.version for n in notes] == ["v1.1.0", "v1.2.0"]
+
+
+def test_fetch_release_notes_keeps_fetched_releases_on_page_limit() -> None:
+    page_one = "https://api.github.com/repos/org/app/releases?per_page=100"
+    page_two = "https://api.github.com/repos/org/app/releases?per_page=100&page=2"
+    release = {"tag_name": "v1.2.0", "name": None, "html_url": "u2", "body": "two"}
+
+    def fake_urlopen(request: Request, timeout: int = 10) -> FakeResponse:
+        if request.full_url == page_one:
+            return FakeResponse(
+                json.dumps([release]).encode(), {"Link": f'<{page_two}>; rel="next"'}
+            )
+        if request.full_url == page_two:
+            raise HTTPError(page_two, 422, "Unprocessable Entity", None, io.BytesIO(b"{}"))
+        raise AssertionError(f"unexpected URL {request.full_url}")
+
+    with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        notes = fetch_release_notes(
+            "https://github.com/org/app", current="1.0.0", latest="1.2.0"
+        )
+
+    assert [n.version for n in notes] == ["v1.2.0"]

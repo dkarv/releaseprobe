@@ -6,11 +6,16 @@ changed. Inspired by [Renovate's docker datasource](https://docs.renovatebot.com
 - Reads [OCI image labels](https://github.com/opencontainers/image-spec/blob/main/annotations.md)
   (`org.opencontainers.image.*`), preferring them over the deprecated
   [label-schema.org](http://label-schema.org/rc1/) labels (`org.label-schema.*`).
+  Manifest (list) annotations with the same keys take precedence, since
+  unlike labels they can't be inherited from the base image.
 - Talks to the image's registry directly (Docker Hub, GHCR, Quay, or any
   registry implementing the [Docker Registry HTTP API v2](https://distribution.github.io/distribution/spec/api/))
   to list tags and fetch labels - no docker daemon required.
 - If the image's source label points at GitHub, fetches the real release
-  notes for every version between the current and the latest tag.
+  notes for every version between the current and the latest tag. Without a
+  source label, the repository is taken from the image's BuildKit build
+  provenance (`vcs:source`) if it has one, and for GHCR images
+  `ghcr.io/<owner>/<repo>` is tried as `github.com/<owner>/<repo>` last.
 
 ## Installation
 
@@ -62,6 +67,24 @@ docker inspect --format '{{json .Config.Labels}}' my-homeassistant-container \
 A path to a JSON file works too (`--current-labels labels.json`). Without
 `--current-labels`, a floating tag fails with an error rather than silently
 comparing against the wrong version.
+
+Many images don't set a version label themselves and inherit their base
+image's instead (e.g. `ollama/ollama` is labeled `24.04`, from
+`ubuntu:24.04`). A labeled version that none of the repository's tags carry
+is therefore ignored. For such images - and those without any version
+label - pass the installed image's manifest digests with `--current-digest`
+(repeatable); releaseprobe then looks for the newest version tag that points
+to one of them:
+
+```bash
+docker image inspect --format '{{index .RepoDigests 0}}' ollama/ollama:latest
+# ollama/ollama@sha256:926d40fd...
+releaseprobe check ollama/ollama:latest --current-labels labels.json \
+  --current-digest ollama/ollama@sha256:926d40fd...
+```
+
+Only the newest 25 version tags are looked up, so an install older than that
+is still reported as an unknown version.
 
 **Limitations:**
 

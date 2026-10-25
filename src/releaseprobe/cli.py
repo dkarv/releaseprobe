@@ -75,6 +75,18 @@ def build_parser() -> argparse.ArgumentParser:
             "the tag itself carries no version to compare from."
         ),
     )
+    check_parser.add_argument(
+        "--current-digest",
+        metavar="DIGEST",
+        action="append",
+        help=(
+            "Manifest digest of the currently installed image, as in the output of "
+            "`docker image inspect --format '{{json .RepoDigests}}' <image>` "
+            "(`repo@sha256:...` or `sha256:...`); may be given more than once. Used to "
+            "find the current version of a floating tag when the image's labels "
+            "carry no usable version."
+        ),
+    )
     check_parser.add_argument("--json", action="store_true", help="Print the full result as JSON.")
 
     return parser
@@ -145,7 +157,7 @@ def _run_check(args: argparse.Namespace) -> int:
             return 1
 
     try:
-        result = check_for_update(args.image, current_labels)
+        result = check_for_update(args.image, current_labels, current_digests=args.current_digest)
     except CheckError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

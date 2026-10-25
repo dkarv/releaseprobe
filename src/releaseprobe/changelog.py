@@ -61,8 +61,21 @@ def _request_headers(token: str | None) -> dict[str, str]:
 
 
 def _list_releases(
-    owner: str, repo: str, *, token: str | None, logger: logging.Logger
+    owner: str,
+    repo: str,
+    *,
+    token: str | None,
+    stop_at: Version | None = None,
+    logger: logging.Logger,
 ) -> list[dict[str, Any]]:
+    """List a repository's releases, newest first.
+
+    GitHub returns releases newest first, so once a page contains a release
+    at or below `stop_at` (the installed version), the older pages can't hold
+    anything newer and aren't fetched. Besides saving requests, this keeps
+    repositories with more than 1000 releases working: GitHub refuses to
+    page past the first 1000 results (HTTP 422).
+    """
     headers = _request_headers(token)
     releases: list[dict[str, Any]] = []
     url: str | None = f"https://api.github.com/repos/{owner}/{repo}/releases?per_page=100"
@@ -71,9 +84,18 @@ def _list_releases(
         request = urllib.request.Request(url, headers=headers)
         try:
             with urllib.request.urlopen(request, timeout=_TIMEOUT) as response:  # noqa: S310
-                releases.extend(json.loads(response.read()))
+                page: list[dict[str, Any]] = json.loads(response.read())
                 url = next_page_url(response.headers.get("Link"), url)
         except urllib.error.HTTPError as exc:
+            if exc.code == 422 and releases:
+                logger.warning(
+                    "GitHub refused to list more releases for %s/%s (HTTP 422), "
+                    "using the %d release(s) fetched so far",
+                    owner,
+                    repo,
+                    len(releases),
+                )
+                break
             logger.warning("could not list releases for %s/%s: HTTP %d", owner, repo, exc.code)
             raise ChangelogError(
                 f"could not list releases for {owner}/{repo}: HTTP {exc.code}"
@@ -81,8 +103,21 @@ def _list_releases(
         except urllib.error.URLError as exc:
             logger.warning("could not reach GitHub: %s", exc.reason)
             raise ChangelogError(f"could not reach GitHub: {exc.reason}") from exc
+        releases.extend(page)
+        if url and stop_at is not None and _reaches(page, stop_at):
+            logger.debug("reached releases at or below %s, not fetching older pages", stop_at)
+            break
     logger.debug("fetched %d release(s) for %s/%s", len(releases), owner, repo)
     return releases
+
+
+def _reaches(page: list[dict[str, Any]], stop_at: Version) -> bool:
+    """True if any release on the page is at or below `stop_at`."""
+    for release in page:
+        version = parse_version(release.get("tag_name") or "")
+        if version is not None and version <= stop_at:
+            return True
+    return False
 
 
 def fetch_release_notes(
@@ -115,7 +150,8 @@ def fetch_release_notes(
     latest_version = parse_version(latest)
 
     notes: list[tuple[Version, ReleaseNote]] = []
-    for release in _list_releases(owner, name, token=token, logger=log):
+    releases = _list_releases(owner, name, token=token, stop_at=current_version, logger=log)
+    for release in releases:
         tag = release.get("tag_name") or ""
         version = parse_version(tag)
         if version is None:

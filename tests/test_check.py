@@ -1,12 +1,21 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
 from unittest.mock import patch
 
 import pytest
 
-from releaseprobe.changelog import ReleaseNote
+from releaseprobe.changelog import ChangelogError, ReleaseNote
 from releaseprobe.check import UnknownVersionError, check_for_update
+from releaseprobe.registry import RegistryError
+
+
+@pytest.fixture(autouse=True)
+def _no_provenance() -> Iterator[None]:
+    """Keep the provenance fallback offline; tests that need it patch it themselves."""
+    with patch("releaseprobe.check.fetch_provenance_source", return_value=None):
+        yield
 
 
 def test_check_for_update_reports_no_update() -> None:
@@ -52,13 +61,93 @@ def test_check_for_update_skips_changelog_without_source() -> None:
     with (
         patch("releaseprobe.check.fetch_labels", return_value={}),
         patch("releaseprobe.check.list_tags", return_value=["1.0.0", "1.2.0"]),
+        patch("releaseprobe.check.fetch_provenance_source", return_value=None) as mock_prov,
         patch("releaseprobe.check.fetch_release_notes") as mock_notes,
+    ):
+        result = check_for_update("docker.io/org/app:1.0.0")
+
+    assert result.has_update
+    assert result.release_notes == []
+    assert mock_prov.call_args.args[0].tag == "1.2.0"
+    mock_notes.assert_not_called()
+
+
+def test_check_for_update_skips_provenance_when_labeled() -> None:
+    labels = {"org.opencontainers.image.source": "https://github.com/org/app"}
+    with (
+        patch("releaseprobe.check.fetch_labels", return_value=labels),
+        patch("releaseprobe.check.list_tags", return_value=["1.0.0", "1.2.0"]),
+        patch("releaseprobe.check.fetch_provenance_source") as mock_prov,
+        patch("releaseprobe.check.fetch_release_notes", return_value=[]),
+    ):
+        check_for_update("ghcr.io/org/app:1.0.0")
+
+    mock_prov.assert_not_called()
+
+
+def test_check_for_update_uses_provenance_source() -> None:
+    notes = [ReleaseNote(version="1.2.0", name="1.2.0", url="u", body="b")]
+    with (
+        patch("releaseprobe.check.fetch_labels", return_value={}),
+        patch("releaseprobe.check.list_tags", return_value=["1.0.0", "1.2.0"]),
+        patch(
+            "releaseprobe.check.fetch_provenance_source",
+            return_value="https://github.com/org/real-repo",
+        ),
+        patch("releaseprobe.check.fetch_release_notes", return_value=notes) as mock_notes,
+    ):
+        result = check_for_update("ghcr.io/org/app:1.0.0")
+
+    assert result.release_notes == notes
+    assert result.latest_info is not None
+    assert result.latest_info.source == "https://github.com/org/real-repo"
+    assert mock_notes.call_args.args == ("https://github.com/org/real-repo",)
+
+
+def test_check_for_update_ignores_unreadable_provenance() -> None:
+    with (
+        patch("releaseprobe.check.fetch_labels", return_value={}),
+        patch("releaseprobe.check.list_tags", return_value=["1.0.0", "1.2.0"]),
+        patch("releaseprobe.check.fetch_provenance_source", side_effect=RegistryError("boom")),
+        patch("releaseprobe.check.fetch_release_notes") as mock_notes,
+    ):
+        result = check_for_update("docker.io/org/app:1.0.0")
+
+    assert result.has_update
+    mock_notes.assert_not_called()
+
+
+def test_check_for_update_guesses_ghcr_source() -> None:
+    notes = [ReleaseNote(version="1.2.0", name="1.2.0", url="u", body="b")]
+    with (
+        patch("releaseprobe.check.fetch_labels", return_value={}),
+        patch("releaseprobe.check.list_tags", return_value=["1.0.0", "1.2.0"]),
+        patch("releaseprobe.check.fetch_provenance_source", return_value=None),
+        patch("releaseprobe.check.fetch_release_notes", return_value=notes) as mock_notes,
+    ):
+        result = check_for_update("ghcr.io/org/app/sub:1.0.0")
+
+    assert result.release_notes == notes
+    assert mock_notes.call_args.args == ("https://github.com/org/app",)
+    # Only a guess, so it isn't reported as the image's source.
+    assert result.latest_info is not None
+    assert result.latest_info.source is None
+
+
+def test_check_for_update_tolerates_wrong_ghcr_guess() -> None:
+    with (
+        patch("releaseprobe.check.fetch_labels", return_value={}),
+        patch("releaseprobe.check.list_tags", return_value=["1.0.0", "1.2.0"]),
+        patch("releaseprobe.check.fetch_provenance_source", return_value=None),
+        patch(
+            "releaseprobe.check.fetch_release_notes",
+            side_effect=ChangelogError("could not list releases for org/app: HTTP 404"),
+        ),
     ):
         result = check_for_update("ghcr.io/org/app:1.0.0")
 
     assert result.has_update
     assert result.release_notes == []
-    mock_notes.assert_not_called()
 
 
 def test_check_for_update_uses_current_labels_for_floating_tag() -> None:
@@ -104,6 +193,71 @@ def test_check_for_update_floating_tag_without_version_raises() -> None:
     ):
         with pytest.raises(UnknownVersionError):
             check_for_update("ghcr.io/org/app:latest")
+
+
+def test_check_for_update_ignores_inherited_version_label() -> None:
+    # e.g. ollama/ollama:latest, labeled with the version of its ubuntu:24.04 base.
+    current_labels = {"org.opencontainers.image.version": "24.04"}
+
+    with (
+        patch("releaseprobe.check.fetch_labels", return_value={}),
+        patch("releaseprobe.check.list_tags", return_value=["0.40.4", "0.40.5", "latest"]),
+    ):
+        with pytest.raises(UnknownVersionError):
+            check_for_update("ollama/ollama:latest", current_labels)
+
+
+def test_check_for_update_trusts_version_label_matching_a_tag() -> None:
+    current_labels = {"org.opencontainers.image.version": "v1.0.0"}
+
+    with (
+        patch("releaseprobe.check.fetch_labels", return_value={}),
+        patch("releaseprobe.check.list_tags", return_value=["1.0.0", "1.2.0"]),
+        patch("releaseprobe.check.fetch_digest") as mock_digest,
+        patch("releaseprobe.check.fetch_release_notes", return_value=[]),
+    ):
+        result = check_for_update(
+            "ghcr.io/org/app:latest", current_labels, current_digests=["sha256:aaa"]
+        )
+
+    assert result.current_version == "v1.0.0"
+    assert result.latest_version == "1.2.0"
+    mock_digest.assert_not_called()
+
+
+def test_check_for_update_resolves_floating_tag_by_digest() -> None:
+    current_labels = {"org.opencontainers.image.version": "24.04"}
+    digests = {"0.40.5": "sha256:new", "0.40.4": "sha256:old", "0.40.3": "sha256:older"}
+
+    def fake_fetch_digest(ref: object, **kwargs: object) -> str:
+        return digests[getattr(ref, "tag", "")]
+
+    with (
+        patch("releaseprobe.check.fetch_labels", return_value={}),
+        patch("releaseprobe.check.list_tags", return_value=[*digests, "0.41.0-rc0", "latest"]),
+        patch("releaseprobe.check.fetch_digest", side_effect=fake_fetch_digest) as mock_digest,
+        patch("releaseprobe.check.fetch_release_notes", return_value=[]),
+    ):
+        result = check_for_update(
+            "ollama/ollama:latest",
+            current_labels,
+            current_digests=["ollama/ollama@sha256:old"],
+        )
+
+    assert result.current_version == "0.40.4"
+    assert result.latest_version == "0.40.5"
+    # Newest first, stopping at the match; pre-releases aren't looked up.
+    assert [call.args[0].tag for call in mock_digest.call_args_list] == ["0.40.5", "0.40.4"]
+
+
+def test_check_for_update_raises_when_digest_matches_no_tag() -> None:
+    with (
+        patch("releaseprobe.check.fetch_labels", return_value={}),
+        patch("releaseprobe.check.list_tags", return_value=["1.0.0", "1.2.0"]),
+        patch("releaseprobe.check.fetch_digest", return_value="sha256:other"),
+    ):
+        with pytest.raises(UnknownVersionError):
+            check_for_update("ghcr.io/org/app:latest", {}, current_digests=["sha256:aaa"])
 
 
 def test_check_for_update_uses_custom_logger() -> None:
