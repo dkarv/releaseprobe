@@ -2,7 +2,10 @@
 
 Each `<name>.txt` holds an image reference and `<name>.json` the labels of
 the installed image (as `docker inspect --format '{{json .Config.Labels}}'`
-prints them). Every pair is run through `releaseprobe check` and must lead to
+prints them). An optional `<name>.digests` lists the installed image's
+manifest digests (as in `docker image inspect --format '{{json .RepoDigests}}'`),
+one per line, for floating-tag images whose labels carry no usable version.
+Every sample is run through `releaseprobe check` and must lead to
 a usable result: either a newer version (optionally with release notes), or
 - if there is no update - a current version that really matches one of the
 registry's version tags, so a silently failed comparison doesn't pass as
@@ -36,8 +39,13 @@ def test_check_sample(name: str, capsys: pytest.CaptureFixture[str]) -> None:
     if not image:
         pytest.skip(f"{name}.txt has no image reference yet")
     labels_file = DATA_DIR / f"{name}.json"
+    digests_file = DATA_DIR / f"{name}.digests"
+    digest_args = []
+    if digests_file.exists():
+        for digest in digests_file.read_text(encoding="utf-8").split():
+            digest_args += ["--current-digest", digest]
 
-    exit_code = main(["check", image, "--current-labels", str(labels_file), "--json"])
+    exit_code = main(["check", image, "--current-labels", str(labels_file), *digest_args, "--json"])
     captured = capsys.readouterr()
     assert exit_code == 0, captured.err
 

@@ -215,7 +215,9 @@ def test_check_passes_current_labels_from_file(tmp_path) -> None:
 
     assert exit_code == 0
     mock_check.assert_called_once_with(
-        "ghcr.io/org/app:latest", {"org.opencontainers.image.version": "1.0.0"}
+        "ghcr.io/org/app:latest",
+        {"org.opencontainers.image.version": "1.0.0"},
+        current_digests=None,
     )
 
 
@@ -237,7 +239,36 @@ def test_check_passes_current_labels_from_stdin(monkeypatch) -> None:
 
     assert exit_code == 0
     mock_check.assert_called_once_with(
-        "ghcr.io/org/app:latest", {"org.opencontainers.image.version": "1.0.0"}
+        "ghcr.io/org/app:latest",
+        {"org.opencontainers.image.version": "1.0.0"},
+        current_digests=None,
+    )
+
+
+def test_check_passes_current_digests() -> None:
+    result = UpdateCheck(
+        image="ghcr.io/org/app:latest",
+        current_version="1.0.0",
+        latest_version=None,
+        current_info=ReleaseInfo(),
+    )
+    with patch("releaseprobe.cli.check_for_update", return_value=result) as mock_check:
+        exit_code = main(
+            [
+                "check",
+                "ghcr.io/org/app:latest",
+                "--current-digest",
+                "ghcr.io/org/app@sha256:aaa",
+                "--current-digest",
+                "sha256:bbb",
+            ]
+        )
+
+    assert exit_code == 0
+    mock_check.assert_called_once_with(
+        "ghcr.io/org/app:latest",
+        None,
+        current_digests=["ghcr.io/org/app@sha256:aaa", "sha256:bbb"],
     )
 
 
