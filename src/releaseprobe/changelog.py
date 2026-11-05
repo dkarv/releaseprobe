@@ -112,6 +112,82 @@ def _list_releases(
     return releases
 
 
+def short_revision(revision: str) -> str:
+    """Abbreviate a full git commit hash like GitHub does (7 characters)."""
+    return revision[:7] if re.fullmatch(r"[0-9a-f]{8,40}", revision) else revision
+
+
+def _first_line(message: str) -> str:
+    return message.strip().splitlines()[0] if message.strip() else ""
+
+
+def fetch_commits_between(
+    source_url: str,
+    *,
+    base: str,
+    head: str,
+    token: str | None = None,
+    logger: logging.Logger | None = None,
+) -> ReleaseNote | None:
+    """Summarize the commits from git revision `base` to `head` as one release note.
+
+    Meant for images built from a branch without version tags, where the
+    only thing identifying a build is its `org.opencontainers.image.revision`.
+    Uses GitHub's compare API, which lists up to 250 commits. Returns None
+    when the source isn't a GitHub repository; raises `ChangelogError` if
+    GitHub doesn't know one of the revisions (e.g. one inherited from a base
+    image, which isn't part of this repository at all).
+    """
+    log = logger or _logger
+    repo = parse_github_repo(source_url)
+    if repo is None:
+        log.debug("%s is not a GitHub repository, skipping the commit comparison", source_url)
+        return None
+    owner, name = repo
+    url = f"https://api.github.com/repos/{owner}/{name}/compare/{base}...{head}"
+    log.info("comparing %s/%s revisions %s...%s", owner, name, base, head)
+    log.debug("GET %s", url)
+    request = urllib.request.Request(url, headers=_request_headers(token))
+    try:
+        with urllib.request.urlopen(request, timeout=_TIMEOUT) as response:  # noqa: S310
+            data: dict[str, Any] = json.loads(response.read())
+    except urllib.error.HTTPError as exc:
+        log.debug("could not compare %s...%s in %s/%s: HTTP %d", base, head, owner, name, exc.code)
+        raise ChangelogError(
+            f"could not compare {base}...{head} in {owner}/{name}: HTTP {exc.code}"
+        ) from exc
+    except urllib.error.URLError as exc:
+        log.warning("could not reach GitHub: %s", exc.reason)
+        raise ChangelogError(f"could not reach GitHub: {exc.reason}") from exc
+
+    commits: list[dict[str, Any]] = data.get("commits") or []
+    total = int(data.get("total_commits") or len(commits))
+    status = data.get("status")
+    log.debug("%s...%s is %s by %d commit(s)", base, head, status, total)
+    lines = []
+    # GitHub lists commits oldest first; show the newest first like the releases.
+    for commit in reversed(commits):
+        sha = str(commit.get("sha") or "")
+        message = _first_line((commit.get("commit") or {}).get("message") or "")
+        link = commit.get("html_url")
+        ref = f"[`{short_revision(sha)}`]({link})" if link else f"`{short_revision(sha)}`"
+        lines.append(f"- {ref} {message}".rstrip())
+    if total > len(commits):
+        lines.append(f"- … and {total - len(commits)} more")
+    if status == "behind":
+        body = "The new image was built from an older revision than the installed one."
+    elif status == "diverged":
+        body = "The new image was built from a diverged revision.\n\n" + "\n".join(lines)
+    else:
+        body = "\n".join(lines)
+    return ReleaseNote(
+        version=short_revision(head),
+        name=f"{total} new commit{'' if total == 1 else 's'}",
+        url=data.get("html_url") or f"https://github.com/{owner}/{name}/compare/{base}...{head}",
+        body=body or None,
+    )
+
+
 def _reaches(page: list[dict[str, Any]], stop_at: Version) -> bool:
     """True if any release on the page is at or below `stop_at`."""
     for release in page:

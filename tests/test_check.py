@@ -348,3 +348,96 @@ def test_check_for_update_defaults_to_module_logger(caplog) -> None:
         check_for_update("ghcr.io/org/app:1.0.0")
 
     assert any("already at the latest version" in message for message in caplog.messages)
+
+
+_REV_OLD = "a" * 40
+_REV_NEW = "b" * 40
+_SOURCE = {"org.opencontainers.image.source": "https://github.com/org/app"}
+
+
+def test_check_for_update_compares_revisions_of_floating_tag() -> None:
+    installed = {**_SOURCE, "org.opencontainers.image.revision": _REV_OLD}
+    remote = {**_SOURCE, "org.opencontainers.image.revision": _REV_NEW}
+    note = ReleaseNote(version="bbbbbbb", name="3 new commits", url="u", body="- c")
+    with (
+        patch("releaseprobe.check.fetch_labels", return_value=remote) as mock_labels,
+        patch("releaseprobe.check.list_tags", return_value=["latest", "main"]),
+        patch("releaseprobe.check.fetch_commits_between", return_value=note) as mock_compare,
+    ):
+        result = check_for_update("ghcr.io/org/app:latest", installed)
+
+    assert result.by_revision
+    assert result.has_update
+    assert result.current_version == "aaaaaaa"
+    assert result.latest_version == "bbbbbbb"
+    assert result.release_notes == [note]
+    assert mock_labels.call_args.args[0].tag == "latest"
+    assert mock_compare.call_args.kwargs["base"] == _REV_OLD
+    assert mock_compare.call_args.kwargs["head"] == _REV_NEW
+
+
+def test_check_for_update_revision_compare_failure_still_reports_update() -> None:
+    installed = {**_SOURCE, "org.opencontainers.image.revision": _REV_OLD}
+    remote = {**_SOURCE, "org.opencontainers.image.revision": _REV_NEW}
+    with (
+        patch("releaseprobe.check.fetch_labels", return_value=remote),
+        patch("releaseprobe.check.list_tags", return_value=["latest"]),
+        patch("releaseprobe.check.fetch_commits_between", side_effect=ChangelogError("404")),
+    ):
+        result = check_for_update("ghcr.io/org/app:latest", installed)
+
+    assert result.by_revision
+    assert result.latest_version == "bbbbbbb"
+    assert result.release_notes == []
+
+
+def test_check_for_update_same_revision_is_up_to_date() -> None:
+    labels = {**_SOURCE, "org.opencontainers.image.revision": _REV_OLD}
+    with (
+        patch("releaseprobe.check.fetch_labels", return_value=labels),
+        patch("releaseprobe.check.list_tags", return_value=["latest"]),
+        patch("releaseprobe.check.fetch_digest", return_value="sha256:abc"),
+    ):
+        result = check_for_update(
+            "ghcr.io/org/app:latest", labels, current_digests=["ghcr.io/org/app@sha256:abc"]
+        )
+
+    assert result.by_revision
+    assert not result.has_update
+    assert result.current_version == "aaaaaaa"
+
+
+def test_check_for_update_same_revision_other_digest_is_unknown() -> None:
+    # The revision label is inherited from the base image: it can't tell builds apart.
+    labels = {"org.opencontainers.image.revision": _REV_OLD}
+    with (
+        patch("releaseprobe.check.fetch_labels", return_value=labels),
+        patch("releaseprobe.check.list_tags", return_value=["latest"]),
+        patch("releaseprobe.check.fetch_digest", return_value="sha256:new"),
+        pytest.raises(UnknownVersionError),
+    ):
+        check_for_update("ghcr.io/org/app:latest", labels, current_digests=["sha256:old"])
+
+
+def test_check_for_update_without_revision_is_unknown() -> None:
+    with (
+        patch("releaseprobe.check.fetch_labels", return_value={}),
+        patch("releaseprobe.check.list_tags", return_value=["latest"]),
+        pytest.raises(UnknownVersionError),
+    ):
+        check_for_update("ghcr.io/org/app:latest", {"org.opencontainers.image.version": "main"})
+
+
+def test_check_for_update_reuses_cached_tags() -> None:
+    cache: dict[str, list[str]] = {}
+    with (
+        patch("releaseprobe.check.fetch_labels", return_value={}),
+        patch("releaseprobe.check.list_tags", return_value=["1.0.0", "1.1.0"]) as mock_tags,
+    ):
+        first = check_for_update("ghcr.io/org/app:1.0.0", {}, tags_cache=cache)
+        second = check_for_update("ghcr.io/org/app:1.1.0", {}, tags_cache=cache)
+
+    mock_tags.assert_called_once()
+    assert cache == {"ghcr.io/org/app": ["1.0.0", "1.1.0"]}
+    assert first.latest_version == "1.1.0"
+    assert not second.has_update

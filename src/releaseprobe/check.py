@@ -4,10 +4,16 @@ from __future__ import annotations
 
 import dataclasses
 import logging
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, MutableMapping
 from dataclasses import dataclass, field
 
-from releaseprobe.changelog import ChangelogError, ReleaseNote, fetch_release_notes
+from releaseprobe.changelog import (
+    ChangelogError,
+    ReleaseNote,
+    fetch_commits_between,
+    fetch_release_notes,
+    short_revision,
+)
 from releaseprobe.imageref import ImageReference
 from releaseprobe.imageref import parse as parse_image_reference
 from releaseprobe.probe import ReleaseInfo, probe_labels
@@ -39,6 +45,11 @@ class UpdateCheck:
     current_info: ReleaseInfo
     latest_info: ReleaseInfo | None = None
     release_notes: list[ReleaseNote] = field(default_factory=list)
+    # True if the image has no usable version and builds were told apart by
+    # their git revision (org.opencontainers.image.revision) instead: then
+    # `current_version` / `latest_version` are abbreviated commit hashes and
+    # the release notes list the commits in between.
+    by_revision: bool = False
 
     @property
     def has_update(self) -> bool:
@@ -93,11 +104,10 @@ def _resolve_current_version(
     digest_version = _version_from_digests(ref, tags, digests, logger=logger)
     if digest_version is not None:
         return digest_version
-    logger.warning("tag %r is floating and the image's version could not be determined", ref.tag)
     raise UnknownVersionError(
-        f"{ref.tag!r} is not a version tag and the image has no usable version label; "
-        "pass the currently installed image's labels (current_labels) or digests "
-        "(current_digests) to determine the current version"
+        f"{ref.tag!r} is not a version tag, the image has no usable version label and "
+        "its digest matches no version tag; pass the currently installed image's labels "
+        "(current_labels) and digests (current_digests) to determine the current version"
     )
 
 
@@ -148,6 +158,23 @@ def _version_from_digests(
     return None
 
 
+def _list_tags_cached(
+    ref: ImageReference,
+    cache: MutableMapping[str, list[str]] | None,
+    *,
+    logger: logging.Logger,
+) -> list[str]:
+    if cache is None:
+        return list_tags(ref, logger=logger)
+    key = f"{ref.registry}/{ref.repository}"
+    tags = cache.get(key)
+    if tags is None:
+        tags = cache[key] = list_tags(ref, logger=logger)
+    else:
+        logger.debug("using %d cached tag(s) of %s", len(tags), key)
+    return tags
+
+
 def _provenance_source(ref: ImageReference, *, logger: logging.Logger) -> str | None:
     """The source named by the image's build provenance; failures just mean "unknown"."""
     try:
@@ -172,12 +199,105 @@ def _guess_source(ref: ImageReference) -> str | None:
     return f"https://github.com/{owner}/{repo}" if owner and repo else None
 
 
+def _check_by_revision(
+    ref: ImageReference,
+    current_info: ReleaseInfo,
+    digests: Iterable[str],
+    *,
+    github_token: str | None,
+    logger: logging.Logger,
+) -> UpdateCheck | None:
+    """Tell an installed floating-tag image and the tag's current image apart by git revision.
+
+    Images built from a branch without version tags (`latest`, `main`, ...)
+    usually still record the commit they were built from in
+    `org.opencontainers.image.revision`. If both the installed image and the
+    one the tag points to now have one, the commits in between serve as the
+    release notes. Returns None if that's not possible.
+    """
+    current_revision = current_info.revision
+    if not current_revision:
+        logger.debug("installed image of %s has no revision label", ref)
+        return None
+    try:
+        latest_info = probe_labels(fetch_labels(ref, logger=logger), logger=logger)
+    except RegistryError as exc:
+        logger.debug("could not fetch the labels of %s: %s", ref, exc)
+        return None
+    latest_revision = latest_info.revision
+    if not latest_revision:
+        logger.debug("%s has no revision label", ref)
+        return None
+
+    current_short = short_revision(current_revision)
+    if latest_revision == current_revision:
+        wanted = {_normalize_digest(d) for d in digests if d}
+        if wanted:
+            try:
+                latest_digest = fetch_digest(ref, logger=logger)
+            except RegistryError as exc:
+                logger.debug("could not fetch the digest of %s: %s", ref, exc)
+                return None
+            if latest_digest not in wanted:
+                # Same revision but a different image: the revision label is
+                # most likely inherited from the base image and says nothing.
+                logger.debug(
+                    "%s has the installed revision %s but another digest, "
+                    "so the revision label is not usable",
+                    ref,
+                    current_short,
+                )
+                return None
+        logger.info("%s is already at the latest revision (%s)", ref, current_short)
+        return UpdateCheck(
+            image=str(ref),
+            current_version=current_short,
+            latest_version=None,
+            current_info=current_info,
+            by_revision=True,
+        )
+
+    latest_short = short_revision(latest_revision)
+    logger.info("newer revision of %s available: %s -> %s", ref, current_short, latest_short)
+    source = latest_info.source or current_info.source
+    if not source:
+        source = _provenance_source(ref, logger=logger)
+        if source:
+            latest_info = dataclasses.replace(latest_info, source=source)
+    source = source or _guess_source(ref)
+    notes: list[ReleaseNote] = []
+    if source:
+        try:
+            note = fetch_commits_between(
+                source,
+                base=current_revision,
+                head=latest_revision,
+                token=github_token,
+                logger=logger,
+            )
+        except ChangelogError as exc:
+            logger.debug("could not list the commits of %s in %s: %s", ref, source, exc)
+            note = None
+        if note is not None:
+            notes = [note]
+    return UpdateCheck(
+        image=str(ref),
+        current_version=current_short,
+        latest_version=latest_short,
+        current_info=current_info,
+        latest_info=latest_info,
+        release_notes=notes,
+        by_revision=True,
+    )
+
+
 def check_for_update(
     image: str,
     current_labels: Mapping[str, str] | None = None,
     github_token: str | None = None,
     logger: logging.Logger | None = None,
     current_digests: Iterable[str] | None = None,
+    tags_cache: MutableMapping[str, list[str]] | None = None,
 ) -> UpdateCheck:
     """Check whether a newer tag exists for `image` and gather release notes for it.
 
@@ -196,7 +316,15 @@ def check_for_update(
     usable version, `current_digests` - the installed image's manifest
     digests, e.g. from `docker image inspect --format '{{json .RepoDigests}}'`,
     either as `repo@sha256:...` or bare `sha256:...` - are matched against the
-    registry's version tags instead.
+    registry's version tags instead. If that fails too, the installed image's
+    `org.opencontainers.image.revision` is compared with that of the image
+    the tag points to now, and the commits in between (for GitHub sources)
+    become the release notes; see `UpdateCheck.by_revision`.
+
+    `tags_cache` - any dict, keyed by `<registry>/<repository>` - lets
+    several checks share one listing of a repository's tags, e.g. for
+    images of the same repository checked in the same round. The caller
+    decides how long it lives; the listing is reused as long as it is kept.
 
     `github_token` is used as the GitHub API bearer token if given,
     overriding the `GITHUB_TOKEN` environment variable, to raise GitHub's low
@@ -219,10 +347,24 @@ def check_for_update(
         if current_labels is not None
         else probe_labels(fetch_labels(ref, logger=log), logger=log)
     )
-    tags = list_tags(ref, logger=log)
-    current_version = _resolve_current_version(
-        ref, tags, current_info.version, current_digests or (), logger=log
-    )
+    tags = _list_tags_cached(ref, tags_cache, logger=log)
+    digests = list(current_digests or ())
+    try:
+        current_version = _resolve_current_version(
+            ref, tags, current_info.version, digests, logger=log
+        )
+    except UnknownVersionError:
+        by_revision = _check_by_revision(
+            ref, current_info, digests, github_token=github_token, logger=log
+        )
+        if by_revision is None:
+            log.warning(
+                "tag %r of %s is floating and the image's version could not be determined",
+                ref.tag,
+                ref,
+            )
+            raise
+        return by_revision
     log.debug("current version of %s resolved to %s", ref, current_version)
 
     latest_tag = find_latest(tags, current_version, logger=log)

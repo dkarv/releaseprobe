@@ -86,14 +86,25 @@ releaseprobe check ollama/ollama:latest --current-labels labels.json \
 Only the newest 25 version tags are looked up, so an install older than that
 is still reported as an unknown version.
 
+Images built straight from a branch, without any version tags, can't be
+compared by version at all. If the installed image (via `--current-labels`)
+and the image the tag points to now both carry an
+`org.opencontainers.image.revision` label, releaseprobe compares those git
+revisions instead: the versions are reported as short commit hashes, and for
+GitHub sources the commits in between (from GitHub's compare API) become the
+release notes. If the revisions are the same but the digests (when given)
+differ, the label is assumed to come from the base image and the version is
+reported as unknown.
+
 **Limitations:**
 
 - Only public/anonymous registry access is supported - no credentials for
   private images or registries yet.
 - Tags are compared as versions using a simple `X.Y[.Z...]` pattern (PEP 440
   under the hood, so `v1.2.3` works too); tags that don't look like a
-  version - `latest`, digests, build numbers, `1.2.3-alpine` flavor suffixes -
-  are ignored, and pre-releases are never suggested as "latest".
+  version - `latest`, digests, build numbers - are ignored, flavored tags like
+  `1.2.3-alpine` are only compared with tags of the same flavor, and
+  pre-releases are never suggested as "latest".
 - Real release notes are only fetched for GitHub-hosted sources; other hosts
   fall back to just the source URL.
 

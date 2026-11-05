@@ -7,7 +7,14 @@ from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request
 
-from releaseprobe.changelog import fetch_release_notes, parse_github_repo
+import pytest
+
+from releaseprobe.changelog import (
+    ChangelogError,
+    fetch_commits_between,
+    fetch_release_notes,
+    parse_github_repo,
+)
 
 
 class FakeResponse:
@@ -157,3 +164,43 @@ def test_fetch_release_notes_keeps_fetched_releases_on_page_limit() -> None:
         notes = fetch_release_notes("https://github.com/org/app", current="1.0.0", latest="1.2.0")
 
     assert [n.version for n in notes] == ["v1.2.0"]
+
+
+def test_fetch_commits_between_lists_commits_newest_first() -> None:
+    compare = {
+        "status": "ahead",
+        "total_commits": 2,
+        "html_url": "https://github.com/org/app/compare/aaa...bbb",
+        "commits": [
+            {"sha": "1" * 40, "html_url": "c1", "commit": {"message": "first\n\nbody"}},
+            {"sha": "2" * 40, "html_url": "c2", "commit": {"message": "second"}},
+        ],
+    }
+    requested: list[str] = []
+
+    def fake_urlopen(request: Request, timeout: int = 10) -> FakeResponse:
+        requested.append(request.full_url)
+        return FakeResponse(json.dumps(compare).encode())
+
+    with patch("releaseprobe.changelog.urllib.request.urlopen", side_effect=fake_urlopen):
+        note = fetch_commits_between("https://github.com/org/app", base="a" * 40, head="b" * 40)
+
+    assert requested == [f"https://api.github.com/repos/org/app/compare/{'a' * 40}...{'b' * 40}"]
+    assert note is not None
+    assert note.version == "bbbbbbb"
+    assert note.name == "2 new commits"
+    assert note.url == "https://github.com/org/app/compare/aaa...bbb"
+    assert note.body == "- [`2222222`](c2) second\n- [`1111111`](c1) first"
+
+
+def test_fetch_commits_between_raises_for_unknown_revision() -> None:
+    error = HTTPError("u", 404, "Not Found", Message(), io.BytesIO(b""))
+    with (
+        patch("releaseprobe.changelog.urllib.request.urlopen", side_effect=error),
+        pytest.raises(ChangelogError),
+    ):
+        fetch_commits_between("https://github.com/org/app", base="aaa", head="bbb")
+
+
+def test_fetch_commits_between_skips_non_github() -> None:
+    assert fetch_commits_between("https://gitlab.com/org/app", base="a", head="b") is None

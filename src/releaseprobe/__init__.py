@@ -3,7 +3,7 @@
 from releaseprobe.check import UnknownVersionError, UpdateCheck, check_for_update
 from releaseprobe.probe import ReleaseInfo, probe_labels
 
-__version__ = "1.0.1"
+__version__ = "1.1.0"
 
 __all__ = [
     "ReleaseInfo",
