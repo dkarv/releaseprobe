@@ -189,9 +189,7 @@ def test_check_reports_errors(capsys) -> None:
 def test_check_reports_unknown_version_error(capsys) -> None:
     from releaseprobe.check import UnknownVersionError
 
-    with patch(
-        "releaseprobe.cli.check_for_update", side_effect=UnknownVersionError("no version")
-    ):
+    with patch("releaseprobe.cli.check_for_update", side_effect=UnknownVersionError("no version")):
         exit_code = main(["check", "ghcr.io/org/app:latest"])
 
     assert exit_code == 1
@@ -209,9 +207,7 @@ def test_check_passes_current_labels_from_file(tmp_path) -> None:
         current_info=ReleaseInfo(),
     )
     with patch("releaseprobe.cli.check_for_update", return_value=result) as mock_check:
-        exit_code = main(
-            ["check", "ghcr.io/org/app:latest", "--current-labels", str(labels_file)]
-        )
+        exit_code = main(["check", "ghcr.io/org/app:latest", "--current-labels", str(labels_file)])
 
     assert exit_code == 0
     mock_check.assert_called_once_with(
@@ -224,9 +220,7 @@ def test_check_passes_current_labels_from_file(tmp_path) -> None:
 def test_check_passes_current_labels_from_stdin(monkeypatch) -> None:
     import io
 
-    monkeypatch.setattr(
-        "sys.stdin", io.StringIO('{"org.opencontainers.image.version": "1.0.0"}')
-    )
+    monkeypatch.setattr("sys.stdin", io.StringIO('{"org.opencontainers.image.version": "1.0.0"}'))
 
     result = UpdateCheck(
         image="ghcr.io/org/app:latest",
@@ -276,9 +270,7 @@ def test_check_reports_invalid_current_labels(tmp_path, capsys) -> None:
     labels_file = tmp_path / "current.json"
     labels_file.write_text("not json")
 
-    exit_code = main(
-        ["check", "ghcr.io/org/app:latest", "--current-labels", str(labels_file)]
-    )
+    exit_code = main(["check", "ghcr.io/org/app:latest", "--current-labels", str(labels_file)])
 
     assert exit_code == 1
     assert "error" in capsys.readouterr().err

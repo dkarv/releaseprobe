@@ -18,8 +18,10 @@ from releaseprobe.registry import (
     fetch_provenance_source,
     list_tags,
 )
-from releaseprobe.versioning import find_latest
+from releaseprobe.versioning import UnknownVersionError, find_latest, parse_flavored
 from releaseprobe.versioning import parse as parse_version
+
+__all__ = ["UnknownVersionError", "UpdateCheck", "check_for_update"]
 
 _logger = logging.getLogger(__name__)
 
@@ -27,10 +29,6 @@ _logger = logging.getLogger(__name__)
 # installed digest belongs to. Each costs one (HEAD) request; an install
 # older than this many releases is reported as an unknown version instead.
 _MAX_DIGEST_LOOKUPS = 25
-
-
-class UnknownVersionError(RuntimeError):
-    """Raised when the current version of an image cannot be determined."""
 
 
 @dataclass
@@ -64,24 +62,34 @@ def _resolve_current_version(
     publishes a tag with that version. Images often don't set the version
     label themselves and inherit their base image's instead (e.g. `24.04`
     from `ubuntu:24.04`), which says nothing about the image's own version.
+    Labels that aren't a version at all (e.g. `main`, `latest`) are ignored,
+    as are flavored ones (e.g. `1.31.7-alpine-slim`) unless the repository
+    has exactly that tag - otherwise they're most likely the base image's too.
 
     Failing that, the installed image's manifest digests (its `RepoDigests`)
     are matched against the digests of the newest version tags.
     """
-    if parse_version(ref.tag, logger=logger) is not None:
+    if parse_flavored(ref.tag, logger=logger) is not None:
         return ref.tag
     if labeled_version:
-        if _is_published(labeled_version, tags, logger=logger):
+        if parse_flavored(labeled_version, logger=logger) is None:
+            logger.warning(
+                "ignoring version label %r of %s: it does not look like a version",
+                labeled_version,
+                ref,
+            )
+        elif _is_published(labeled_version, tags, logger=logger):
             logger.debug(
                 "tag %r is floating, using labeled version %r instead", ref.tag, labeled_version
             )
             return labeled_version
-        logger.warning(
-            "ignoring version label %r of %s: no tag of the repository has that version, "
-            "so it is likely inherited from the base image",
-            labeled_version,
-            ref,
-        )
+        else:
+            logger.warning(
+                "ignoring version label %r of %s: no tag of the repository has that version, "
+                "so it is likely inherited from the base image",
+                labeled_version,
+                ref,
+            )
     digest_version = _version_from_digests(ref, tags, digests, logger=logger)
     if digest_version is not None:
         return digest_version
@@ -94,11 +102,16 @@ def _resolve_current_version(
 
 
 def _is_published(version: str, tags: list[str], *, logger: logging.Logger) -> bool:
-    """True if one of the tags has the given version (or the version can't be checked)."""
+    """True if one of the tags has the given (parseable) version.
+
+    A flavored version (e.g. `1.31.7-alpine-slim`) must match a tag exactly.
+    """
+    if version in tags:
+        return True
     parsed = parse_version(version, logger=logger)
     if parsed is None:
-        # Not comparable anyway; find_latest() reports that.
-        return True
+        # Flavored, and no tag has exactly that flavor and version.
+        return False
     tag_versions = [v for tag in tags if (v := parse_version(tag, logger=logger)) is not None]
     # Without any version tags there's nothing to check against, nor to update to.
     return not tag_versions or parsed in tag_versions

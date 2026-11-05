@@ -21,6 +21,7 @@ from packaging.version import Version
 
 from releaseprobe._http import next_page_url
 from releaseprobe.versioning import parse as parse_version
+from releaseprobe.versioning import parse_flavored
 
 _TIMEOUT = 10
 _GITHUB_URL_RE = re.compile(r"github\.com[:/]+(?P<owner>[^/]+)/(?P<repo>[^/]+?)/?$")
@@ -120,6 +121,11 @@ def _reaches(page: list[dict[str, Any]], stop_at: Version) -> bool:
     return False
 
 
+def _version_of(tag: str) -> Version | None:
+    parsed = parse_flavored(tag)
+    return parsed[0] if parsed else None
+
+
 def fetch_release_notes(
     source_url: str,
     *,
@@ -146,8 +152,9 @@ def fetch_release_notes(
     owner, name = repo
     log.info("fetching release notes for %s/%s between %s and %s", owner, name, current, latest)
 
-    current_version = parse_version(current)
-    latest_version = parse_version(latest)
+    # Image tags may carry a flavor (`1.2.3-alpine`), GitHub releases don't.
+    current_version = _version_of(current)
+    latest_version = _version_of(latest)
 
     notes: list[tuple[Version, ReleaseNote]] = []
     releases = _list_releases(owner, name, token=token, stop_at=current_version, logger=log)

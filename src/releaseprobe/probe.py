@@ -45,9 +45,7 @@ class ReleaseInfo:
         return self.source or self.url or self.documentation
 
 
-def probe_labels(
-    labels: Mapping[str, str], logger: logging.Logger | None = None
-) -> ReleaseInfo:
+def probe_labels(labels: Mapping[str, str], logger: logging.Logger | None = None) -> ReleaseInfo:
     """Extract release metadata from a mapping of container image labels."""
     log = logger or _logger
     info = ReleaseInfo(
@@ -58,9 +56,7 @@ def probe_labels(
         revision=_first(labels, label_keys.REVISION_KEYS),
         raw_labels=dict(labels),
     )
-    log.debug(
-        "probed %d label(s): version=%s source=%s", len(labels), info.version, info.source
-    )
+    log.debug("probed %d label(s): version=%s source=%s", len(labels), info.version, info.source)
     if info.version is None:
         log.debug("no version label found among %s", label_keys.VERSION_KEYS)
     return info
