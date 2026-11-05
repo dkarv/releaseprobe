@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import pytest
 
-from releaseprobe.imageref import ImageReference, InvalidImageReferenceError, parse
+from releaseprobe.imageref import (
+    ImageReference,
+    InvalidImageReferenceError,
+    normalize_digest,
+    parse,
+    repository_name,
+    short_digest,
+)
 
 
 def test_parse_docker_hub_official_image() -> None:
@@ -60,3 +67,27 @@ def test_parse_rejects_digest_references() -> None:
 
 def test_str_roundtrip() -> None:
     assert str(parse("ghcr.io/org/app:1.2.3")) == "ghcr.io/org/app:1.2.3"
+
+
+def test_repository_name_matches_parsed_reference() -> None:
+    for reference in ("nginx:1.25", "docker.io/library/nginx:latest", "ghcr.io/org/app:v1"):
+        assert repository_name(reference) == parse(reference).repository_name
+
+
+def test_repository_name_accepts_untagged_and_digest_references() -> None:
+    assert repository_name("nginx") == "registry-1.docker.io/library/nginx"
+    assert repository_name("index.docker.io/nginx@sha256:abc") == (
+        "registry-1.docker.io/library/nginx"
+    )
+    assert repository_name("ghcr.io/org/app:1.0@sha256:abc") == "ghcr.io/org/app"
+    assert repository_name("localhost:5000/app") == "localhost:5000/app"
+    assert repository_name("localhost:5000/app:1.0") == "localhost:5000/app"
+
+
+def test_normalize_and_short_digest() -> None:
+    assert normalize_digest("ghcr.io/org/app@sha256:0123") == "sha256:0123"
+    assert normalize_digest("sha256:0123") == "sha256:0123"
+    assert short_digest("ghcr.io/org/app@sha256:0123456789abcdef") == "sha256:0123456789ab"
+    assert short_digest("sha256:abc") == "sha256:abc"
+    assert short_digest("garbage") is None
+    assert short_digest("") is None

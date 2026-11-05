@@ -25,8 +25,15 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Iterable
+from typing import TYPE_CHECKING
 
 from packaging.version import InvalidVersion, Version
+
+from releaseprobe.imageref import short_digest
+
+if TYPE_CHECKING:
+    from releaseprobe.probe import ReleaseInfo
 
 _DOTTED_VERSION = re.compile(r"^v?\d+(\.\d+){1,3}")
 
@@ -50,7 +57,43 @@ _logger = logging.getLogger(__name__)
 
 
 class UnknownVersionError(RuntimeError):
-    """Raised when the current version of an image cannot be determined."""
+    """Raised when the current version of an image cannot be determined.
+
+    When raised by `check_for_update`, it carries what is known about the
+    installed image, so callers can show that instead of a version:
+
+    - `tag`: the (floating) tag of the image reference, e.g. `latest`
+    - `digests`: the installed image's digests that were passed in
+    - `current_info`: the `ReleaseInfo` probed from the installed image's labels
+    - `reason`: a short, user-facing explanation of why the version is unknown
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        tag: str | None = None,
+        digests: Iterable[str] = (),
+        current_info: ReleaseInfo | None = None,
+        reason: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.tag = tag
+        self.digests = list(digests)
+        self.current_info = current_info
+        self.reason = reason or message
+
+    @property
+    def digest(self) -> str | None:
+        """The first installed digest, abbreviated for display (see `short_digest`)."""
+        return next((short for d in self.digests if (short := short_digest(d))), None)
+
+    @property
+    def installed_version(self) -> str:
+        """A display stand-in for the unknown version: `latest (sha256:0123456789ab)`."""
+        if self.tag and self.digest:
+            return f"{self.tag} ({self.digest})"
+        return self.tag or self.digest or "unknown"
 
 
 def parse(tag: str, logger: logging.Logger | None = None) -> Version | None:

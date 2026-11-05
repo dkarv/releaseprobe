@@ -144,6 +144,23 @@ info = probe_labels({"org.opencontainers.image.source": "https://github.com/org/
 info.release_notes_url()  # "https://github.com/org/app"
 ```
 
+If the installed version of a floating-tag image can't be determined,
+`UnknownVersionError` carries what is known about the installed image:
+
+```python
+from releaseprobe import UnknownVersionError, check_for_update, repository_name
+
+try:
+    check_for_update("ghcr.io/org/app:latest", labels, current_digests=digests)
+except UnknownVersionError as err:
+    err.installed_version  # "latest (sha256:0123456789ab)"
+    err.reason  # "floating tag 'latest', no version label, ..."
+    err.current_info.release_notes_url()  # from the installed image's labels
+
+# The key check_for_update's tags_cache uses, for any image reference:
+repository_name("nginx")  # "registry-1.docker.io/library/nginx"
+```
+
 Every public function logs progress and diagnostics through the standard
 `logging` module, under logger names rooted at `releaseprobe` (e.g.
 `releaseprobe.registry`) - configure those as usual to see them. To route the

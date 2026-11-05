@@ -14,7 +14,7 @@ from releaseprobe.changelog import (
     fetch_release_notes,
     short_revision,
 )
-from releaseprobe.imageref import ImageReference
+from releaseprobe.imageref import ImageReference, normalize_digest
 from releaseprobe.imageref import parse as parse_image_reference
 from releaseprobe.probe import ReleaseInfo, probe_labels
 from releaseprobe.registry import (
@@ -127,16 +127,11 @@ def _is_published(version: str, tags: list[str], *, logger: logging.Logger) -> b
     return not tag_versions or parsed in tag_versions
 
 
-def _normalize_digest(digest: str) -> str:
-    """`repo@sha256:abc` (as in RepoDigests) -> `sha256:abc`."""
-    return digest.rpartition("@")[2]
-
-
 def _version_from_digests(
     ref: ImageReference, tags: list[str], digests: Iterable[str], *, logger: logging.Logger
 ) -> str | None:
     """Find the newest version tag pointing to one of the installed image's digests."""
-    wanted = {_normalize_digest(d) for d in digests if d}
+    wanted = {normalize_digest(d) for d in digests if d}
     if not wanted:
         return None
     candidates = sorted(
@@ -166,7 +161,7 @@ def _list_tags_cached(
 ) -> list[str]:
     if cache is None:
         return list_tags(ref, logger=logger)
-    key = f"{ref.registry}/{ref.repository}"
+    key = ref.repository_name
     tags = cache.get(key)
     if tags is None:
         tags = cache[key] = list_tags(ref, logger=logger)
@@ -231,7 +226,7 @@ def _check_by_revision(
 
     current_short = short_revision(current_revision)
     if latest_revision == current_revision:
-        wanted = {_normalize_digest(d) for d in digests if d}
+        wanted = {normalize_digest(d) for d in digests if d}
         if wanted:
             try:
                 latest_digest = fetch_digest(ref, logger=logger)
@@ -291,6 +286,16 @@ def _check_by_revision(
     )
 
 
+def _unknown_version_reason(
+    ref: ImageReference, current_info: ReleaseInfo, digests: list[str]
+) -> str:
+    """Explain to a user why the installed version couldn't be determined."""
+    label = "no usable version label" if current_info.version else "no version label"
+    digest = "a digest matching no version tag" if digests else "no digest to match"
+    revision = "no comparable revision" if current_info.revision else "no revision label"
+    return f"floating tag {ref.tag!r}, {label}, {digest}, {revision}"
+
+
 def check_for_update(
     image: str,
     current_labels: Mapping[str, str] | None = None,
@@ -319,7 +324,9 @@ def check_for_update(
     registry's version tags instead. If that fails too, the installed image's
     `org.opencontainers.image.revision` is compared with that of the image
     the tag points to now, and the commits in between (for GitHub sources)
-    become the release notes; see `UpdateCheck.by_revision`.
+    become the release notes; see `UpdateCheck.by_revision`. If none of
+    this works, `UnknownVersionError` is raised; its `installed_version`,
+    `reason` and `current_info` describe the installed image for display.
 
     `tags_cache` - any dict, keyed by `<registry>/<repository>` - lets
     several checks share one listing of a repository's tags, e.g. for
@@ -353,7 +360,7 @@ def check_for_update(
         current_version = _resolve_current_version(
             ref, tags, current_info.version, digests, logger=log
         )
-    except UnknownVersionError:
+    except UnknownVersionError as exc:
         by_revision = _check_by_revision(
             ref, current_info, digests, github_token=github_token, logger=log
         )
@@ -363,7 +370,13 @@ def check_for_update(
                 ref.tag,
                 ref,
             )
-            raise
+            raise UnknownVersionError(
+                str(exc),
+                tag=ref.tag,
+                digests=digests,
+                current_info=current_info,
+                reason=_unknown_version_reason(ref, current_info, digests),
+            ) from exc
         return by_revision
     log.debug("current version of %s resolved to %s", ref, current_version)
 

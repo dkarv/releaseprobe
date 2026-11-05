@@ -207,6 +207,44 @@ def test_check_for_update_ignores_inherited_version_label() -> None:
             check_for_update("ollama/ollama:latest", current_labels)
 
 
+def test_unknown_version_error_describes_installed_image() -> None:
+    current_labels = {
+        "org.opencontainers.image.version": "24.04",
+        "org.opencontainers.image.source": "https://github.com/org/app",
+    }
+
+    with (
+        patch("releaseprobe.check.fetch_labels", return_value={}),
+        patch("releaseprobe.check.list_tags", return_value=["0.40.4", "latest"]),
+        patch("releaseprobe.check.fetch_digest", return_value="sha256:ffff"),
+    ):
+        with pytest.raises(UnknownVersionError) as excinfo:
+            check_for_update(
+                "ghcr.io/org/app:latest",
+                current_labels,
+                current_digests=["ghcr.io/org/app@sha256:0123456789abcdef"],
+            )
+
+    err = excinfo.value
+    assert err.tag == "latest"
+    assert err.digest == "sha256:0123456789ab"
+    assert err.installed_version == "latest (sha256:0123456789ab)"
+    assert err.reason == (
+        "floating tag 'latest', no usable version label, "
+        "a digest matching no version tag, no revision label"
+    )
+    assert err.current_info is not None
+    assert err.current_info.release_notes_url() == "https://github.com/org/app"
+
+
+def test_unknown_version_error_defaults() -> None:
+    err = UnknownVersionError("nope")
+    assert err.reason == "nope"
+    assert err.installed_version == "unknown"
+    assert UnknownVersionError("x", tag="main").installed_version == "main"
+    assert UnknownVersionError("x", digests=["sha256:abc"]).installed_version == "sha256:abc"
+
+
 def test_check_for_update_trusts_version_label_matching_a_tag() -> None:
     current_labels = {"org.opencontainers.image.version": "v1.0.0"}
 
