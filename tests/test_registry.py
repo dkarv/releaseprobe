@@ -54,7 +54,7 @@ REF = ImageReference(registry="ghcr.io", repository="org/app", tag="1.2.3")
 
 def test_list_tags_simple() -> None:
     def fake_urlopen(request: Request, timeout: int = 10) -> FakeResponse:
-        assert request.full_url == "https://ghcr.io/v2/org/app/tags/list"
+        assert request.full_url == "https://ghcr.io/v2/org/app/tags/list?n=1000"
         return _json_response(200, {"tags": ["1.0.0", "1.2.3"]})
 
     with patch("urllib.request.urlopen", side_effect=fake_urlopen):
@@ -66,7 +66,7 @@ def test_list_tags_handles_auth_challenge() -> None:
 
     def fake_urlopen(request: Request, timeout: int = 10) -> FakeResponse:
         calls.append(request.full_url)
-        if request.full_url == "https://ghcr.io/v2/org/app/tags/list":
+        if request.full_url == "https://ghcr.io/v2/org/app/tags/list?n=1000":
             if request.get_header("Authorization") is None:
                 raise _auth_error()
             assert request.get_header("Authorization") == "Bearer test-token"
@@ -77,11 +77,11 @@ def test_list_tags_handles_auth_challenge() -> None:
 
     with patch("urllib.request.urlopen", side_effect=fake_urlopen):
         assert list_tags(REF) == ["1.2.3"]
-    assert calls.count("https://ghcr.io/v2/org/app/tags/list") == 2
+    assert calls.count("https://ghcr.io/v2/org/app/tags/list?n=1000") == 2
 
 
 def test_list_tags_follows_pagination() -> None:
-    page_one_url = "https://ghcr.io/v2/org/app/tags/list"
+    page_one_url = "https://ghcr.io/v2/org/app/tags/list?n=1000"
     page_two_url = "https://ghcr.io/v2/org/app/tags/list?n=1&last=1.0.0"
 
     def fake_urlopen(request: Request, timeout: int = 10) -> FakeResponse:
@@ -98,7 +98,7 @@ def test_list_tags_follows_pagination() -> None:
 
 
 def test_list_tags_reuses_token_across_pages() -> None:
-    page_one_url = "https://ghcr.io/v2/org/app/tags/list"
+    page_one_url = "https://ghcr.io/v2/org/app/tags/list?n=1000"
     page_two_url = "https://ghcr.io/v2/org/app/tags/list?n=1&last=1.0.0"
     calls: list[str] = []
 
@@ -154,6 +154,69 @@ def test_list_tags_gives_up_after_retries(monkeypatch: pytest.MonkeyPatch) -> No
     assert len(attempts) == 3
 
 
+def test_list_tags_overrides_zero_page_size() -> None:
+    # GHCR's next-page links carry n=0, i.e. its small default page size.
+    page_two_link = "/v2/org/app/tags/list?last=1.0.0&n=0"
+    calls: list[str] = []
+
+    def fake_urlopen(request: Request, timeout: int = 10) -> FakeResponse:
+        calls.append(request.full_url)
+        if len(calls) == 1:
+            return _json_response(
+                200, {"tags": ["1.0.0"]}, {"Link": f'<{page_two_link}>; rel="next"'}
+            )
+        return _json_response(200, {"tags": ["1.2.3"]})
+
+    with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        assert list_tags(REF) == ["1.0.0", "1.2.3"]
+    assert calls == [
+        "https://ghcr.io/v2/org/app/tags/list?n=1000",
+        "https://ghcr.io/v2/org/app/tags/list?last=1.0.0&n=1000",
+    ]
+
+
+def _rate_limited(retry_after: str | None = None) -> HTTPError:
+    headers = Message()
+    if retry_after is not None:
+        headers["Retry-After"] = retry_after
+    return HTTPError("https://ghcr.io", 429, "Too Many Requests", headers, io.BytesIO(b"{}"))
+
+
+def test_list_tags_retries_rate_limited_requests(monkeypatch: pytest.MonkeyPatch) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr(registry.time, "sleep", sleeps.append)
+    attempts: list[str] = []
+
+    def fake_urlopen(request: Request, timeout: int = 10) -> FakeResponse:
+        attempts.append(request.full_url)
+        if len(attempts) == 1:
+            raise _rate_limited("3")
+        if len(attempts) == 2:
+            raise _rate_limited("3600")
+        return _json_response(200, {"tags": ["1.2.3"]})
+
+    with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        assert list_tags(REF) == ["1.2.3"]
+    # Retry-After is honored, but capped.
+    assert sleeps == [3.0, registry._MAX_RETRY_AFTER]
+
+
+def test_list_tags_gives_up_when_rate_limited(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(registry, "_RATE_LIMIT_DELAYS", (0.0, 0.0))
+    attempts: list[str] = []
+
+    def fake_urlopen(request: Request, timeout: int = 10) -> FakeResponse:
+        attempts.append(request.full_url)
+        raise _rate_limited()
+
+    with (
+        patch("urllib.request.urlopen", side_effect=fake_urlopen),
+        pytest.raises(RegistryError, match="HTTP 429"),
+    ):
+        list_tags(REF)
+    assert len(attempts) == 3
+
+
 MANIFEST_URL = "https://ghcr.io/v2/org/app/manifests/1.2.3"
 BLOB_URL = "https://ghcr.io/v2/org/app/blobs/sha256:configdigest"
 
@@ -188,7 +251,9 @@ def test_fetch_labels_resolves_manifest_list() -> None:
         "mediaType": "application/vnd.oci.image.manifest.v1+json",
         "config": {"digest": "sha256:configdigest"},
     }
-    config = {"config": {"Labels": {"org.opencontainers.image.source": "https://github.com/org/app"}}}
+    config = {
+        "config": {"Labels": {"org.opencontainers.image.source": "https://github.com/org/app"}}
+    }
 
     def fake_urlopen(request: Request, timeout: int = 10) -> FakeResponse:
         if request.full_url == MANIFEST_URL:
@@ -200,7 +265,9 @@ def test_fetch_labels_resolves_manifest_list() -> None:
         raise AssertionError(f"unexpected URL {request.full_url}")
 
     with patch("urllib.request.urlopen", side_effect=fake_urlopen):
-        assert fetch_labels(REF) == {"org.opencontainers.image.source": "https://github.com/org/app"}
+        assert fetch_labels(REF) == {
+            "org.opencontainers.image.source": "https://github.com/org/app"
+        }
 
 
 def test_fetch_digest_uses_head_request() -> None:
@@ -334,3 +401,12 @@ def test_fetch_provenance_source_for_single_manifest() -> None:
     manifest = {"mediaType": "application/vnd.oci.image.manifest.v1+json", "config": {}}
     with patch("urllib.request.urlopen", return_value=_json_response(200, manifest)):
         assert fetch_provenance_source(REF) is None
+
+
+def test_retry_after_parses_http_dates_and_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(registry.time, "time", lambda: 1_000_000_000.0)
+    # 10 seconds after the fake "now" (2001-09-09T01:46:40Z).
+    assert registry._retry_after("Sun, 09 Sep 2001 01:46:50 GMT", default=1.0) == 10.0
+    assert registry._retry_after("Sun, 09 Sep 2001 01:46:00 GMT", default=1.0) == 0.0
+    assert registry._retry_after("soon", default=1.0) == 1.0
+    assert registry._retry_after(None, default=1.0) == 1.0

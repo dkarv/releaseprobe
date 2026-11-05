@@ -50,9 +50,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="-",
         help="Path to a JSON file with the image labels, or '-' to read from stdin (default).",
     )
-    labels_parser.add_argument(
-        "--json", action="store_true", help="Print the full result as JSON."
-    )
+    labels_parser.add_argument("--json", action="store_true", help="Print the full result as JSON.")
 
     check_parser = subparsers.add_parser(
         "check",

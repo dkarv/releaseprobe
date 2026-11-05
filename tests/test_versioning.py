@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import pytest
 from packaging.version import Version
 
-from releaseprobe.versioning import find_latest, parse
+from releaseprobe.versioning import UnknownVersionError, find_latest, parse, parse_flavored
 
 
 def test_parse_accepts_semver_and_v_prefix() -> None:
@@ -40,8 +41,10 @@ def test_find_latest_returns_none_when_already_latest() -> None:
     assert find_latest(["1.0.0", "1.2.0"], "1.2.0") is None
 
 
-def test_find_latest_returns_none_when_current_unparseable() -> None:
-    assert find_latest(["1.0.0", "1.2.0"], "latest") is None
+def test_find_latest_raises_when_current_unparseable() -> None:
+    # "Can't compare" must not look like "already up to date".
+    with pytest.raises(UnknownVersionError):
+        find_latest(["1.0.0", "1.2.0"], "latest")
 
 
 def test_find_latest_handles_v_prefix_consistently() -> None:
@@ -81,3 +84,43 @@ def test_find_latest_duplicati_skips_canary_and_prefers_newer_build() -> None:
 
 def test_find_latest_newer_linuxserver_build_of_same_version() -> None:
     assert find_latest(["1.2.3-ls45", "1.2.3-ls46"], "1.2.3-ls45") == "1.2.3-ls46"
+
+
+@pytest.mark.parametrize(
+    ("tag", "expected"),
+    [
+        ("1.2.3", ("1.2.3", "")),
+        ("1.31.7-alpine-slim", ("1.31.7", "alpine-slim")),
+        ("2.0.0-rc1-alpine", ("2.0.0rc1", "alpine")),
+        ("1.2.3-beta", ("1.2.3b0", "")),
+        ("1.2.3-ls45", ("1.2.3+ls45", "")),
+        ("v1.2-alpine3.20", ("1.2", "alpine3.20")),
+    ],
+)
+def test_parse_flavored(tag: str, expected: tuple[str, str]) -> None:
+    parsed = parse_flavored(tag)
+    assert parsed is not None
+    assert (str(parsed[0]), parsed[1]) == expected
+
+
+@pytest.mark.parametrize(
+    "tag", ["latest", "main", "arch_0_linux-amd64_ubuntu", "1-alpine", "1.2.3-"]
+)
+def test_parse_flavored_rejects_non_versions(tag: str) -> None:
+    assert parse_flavored(tag) is None
+
+
+def test_parse_still_rejects_flavored_tags() -> None:
+    assert parse("1.2.3-alpine") is None
+
+
+def test_find_latest_stays_within_flavor() -> None:
+    tags = [
+        "1.31.7-alpine-slim",
+        "1.32.0-alpine-slim",
+        "1.33.0",
+        "1.34.0-alpine",
+        "1.35.0-rc1-alpine-slim",
+    ]
+    assert find_latest(tags, "1.31.7-alpine-slim") == "1.32.0-alpine-slim"
+    assert find_latest(tags, "1.30.0") == "1.33.0"

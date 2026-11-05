@@ -3,11 +3,16 @@
 Tags are compared as PEP 440 versions (which also covers plain semver-style
 strings like `1.2.3` or `v1.2.3`). Tags that don't look like a dotted
 release version to begin with - `latest`, `stable`, digests, attestation
-tags like `sha256-abcd.sig`, bare build numbers, flavor-suffixed tags like
-`1.2.3-alpine` - are ignored rather than compared: PEP 440 alone is too
-permissive (it happily accepts a bare integer like a Docker Hub build
-number as a "version"), so we first require at least a `X.Y` shape.
-Pre-releases are never suggested as the "latest" version.
+tags like `sha256-abcd.sig`, bare build numbers - are ignored rather than
+compared: PEP 440 alone is too permissive (it happily accepts a bare integer
+like a Docker Hub build number as a "version"), so we first require at least
+a `X.Y` shape. Pre-releases are never suggested as the "latest" version.
+
+Flavor-suffixed tags like `1.2.3-alpine` or `1.2.3-alpine-slim` are split
+into a version and a flavor (see `parse_flavored`), and - like Renovate does
+- only compared against tags of the same flavor: `1.2.3-alpine` is updated to
+`1.3.0-alpine`, never to `1.3.0` or `1.3.0-debian`. Plain `parse` still
+rejects them, so they never mix with unflavored versions.
 
 Two common non-PEP 440 decorations are understood and normalized first:
 a release channel with date as used by Duplicati (`2.4.0.0_stable_2026-09-03`,
@@ -44,20 +49,28 @@ _CHANNELS = {
 _logger = logging.getLogger(__name__)
 
 
+class UnknownVersionError(RuntimeError):
+    """Raised when the current version of an image cannot be determined."""
+
+
 def parse(tag: str, logger: logging.Logger | None = None) -> Version | None:
-    log = logger or _logger
+    version, reason = _parse(tag)
+    if version is None:
+        (logger or _logger).debug("ignoring tag %r: %s", tag, reason)
+    return version
+
+
+def _parse(tag: str) -> tuple[Version | None, str]:
+    """Parse a tag without logging; returns the version or why it isn't one."""
     if not _DOTTED_VERSION.match(tag):
-        log.debug("ignoring tag %r: does not look like a dotted version", tag)
-        return None
+        return None, "does not look like a dotted version"
     normalized = _normalize(tag)
     if normalized is None:
-        log.debug("ignoring tag %r: unknown release channel", tag)
-        return None
+        return None, "unknown release channel"
     try:
-        return Version(normalized)
+        return Version(normalized), ""
     except InvalidVersion:
-        log.debug("ignoring tag %r: not a valid version", tag)
-        return None
+        return None, "not a valid version"
 
 
 def _normalize(tag: str) -> str | None:
@@ -72,23 +85,54 @@ def _normalize(tag: str) -> str | None:
     return f"{match['core']}{marker}{local}"
 
 
-def find_latest(
-    tags: list[str], current: str, logger: logging.Logger | None = None
-) -> str | None:
-    """Return the highest version tag that is newer than `current`, if any."""
+def parse_flavored(tag: str, logger: logging.Logger | None = None) -> tuple[Version, str] | None:
+    """Parse a tag into its version and flavor suffix (`""` for none).
+
+    `1.2.3` -> (1.2.3, ""), `1.31.7-alpine-slim` -> (1.31.7, "alpine-slim"),
+    `2.0.0-rc1-alpine` -> (2.0.0rc1, "alpine"). Suffixes PEP 440 understands
+    by itself (pre-releases like `-rc1` or `-beta`, linuxserver.io's `-ls45`)
+    are part of the version, not a flavor. A flavor has to start with a letter.
+    """
+    version, _ = _parse(tag)
+    if version is not None:
+        return version, ""
+    if _DOTTED_VERSION.match(tag):
+        # Split at the rightmost dash that leaves a valid version on the left.
+        index = len(tag)
+        while (index := tag.rfind("-", 0, index)) > 0:
+            flavor = tag[index + 1 :]
+            if flavor[:1].isalpha() and (version := _parse(tag[:index])[0]) is not None:
+                return version, flavor
+    (logger or _logger).debug("ignoring tag %r: does not look like a (flavored) version", tag)
+    return None
+
+
+def find_latest(tags: list[str], current: str, logger: logging.Logger | None = None) -> str | None:
+    """Return the highest version tag that is newer than `current`, if any.
+
+    Only tags with the same flavor as `current` are considered (see
+    `parse_flavored`). Raises `UnknownVersionError` if `current` isn't a
+    version at all: "can't compare" must not look like "already up to date".
+    """
     log = logger or _logger
-    current_version = parse(current, logger=log)
-    if current_version is None:
+    parsed_current = parse_flavored(current, logger=log)
+    if parsed_current is None:
         log.warning("current version %r does not look like a version, cannot compare", current)
-        return None
+        raise UnknownVersionError(f"current version {current!r} does not look like a version")
+    current_version, flavor = parsed_current
 
     candidates = [
         (version, tag)
         for tag in tags
-        if (version := parse(tag, logger=log)) is not None and not version.is_prerelease
+        if (parsed := parse_flavored(tag, logger=log)) is not None
+        and parsed[1] == flavor
+        and not (version := parsed[0]).is_prerelease
     ]
     log.debug(
-        "%d of %d tag(s) look like comparable, non-prerelease versions", len(candidates), len(tags)
+        "%d of %d tag(s) look like comparable, non-prerelease versions%s",
+        len(candidates),
+        len(tags),
+        f" of flavor {flavor!r}" if flavor else "",
     )
     if not candidates:
         return None

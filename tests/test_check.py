@@ -225,6 +225,72 @@ def test_check_for_update_trusts_version_label_matching_a_tag() -> None:
     mock_digest.assert_not_called()
 
 
+@pytest.mark.parametrize("label", ["main", "latest", "arch_0_linux-amd64_ubuntu"])
+def test_check_for_update_unparseable_version_label_raises(label: str) -> None:
+    # Used to be reported as "already up to date" with the label as version.
+    current_labels = {"org.opencontainers.image.version": label}
+    with (
+        patch("releaseprobe.check.fetch_labels", return_value={}),
+        patch("releaseprobe.check.list_tags", return_value=["1.0.0", "1.2.0", "main"]),
+    ):
+        with pytest.raises(UnknownVersionError):
+            check_for_update("ghcr.io/org/app:latest", current_labels)
+
+
+def test_check_for_update_unparseable_version_label_falls_back_to_digest() -> None:
+    current_labels = {"org.opencontainers.image.version": "main"}
+    with (
+        patch("releaseprobe.check.fetch_labels", return_value={}),
+        patch("releaseprobe.check.list_tags", return_value=["1.0.0", "1.2.0"]),
+        patch("releaseprobe.check.fetch_digest", side_effect=["sha256:new", "sha256:old"]),
+        patch("releaseprobe.check.fetch_release_notes", return_value=[]),
+    ):
+        result = check_for_update(
+            "ghcr.io/org/app:latest", current_labels, current_digests=["sha256:old"]
+        )
+
+    assert result.current_version == "1.0.0"
+    assert result.latest_version == "1.2.0"
+
+
+def test_check_for_update_flavored_label_matching_a_tag() -> None:
+    current_labels = {"org.opencontainers.image.version": "1.31.7-alpine-slim"}
+    tags = ["1.31.7-alpine-slim", "1.32.0-alpine-slim", "1.40.0", "latest"]
+    with (
+        patch("releaseprobe.check.fetch_labels", return_value={}),
+        patch("releaseprobe.check.list_tags", return_value=tags),
+        patch("releaseprobe.check.fetch_release_notes", return_value=[]),
+    ):
+        result = check_for_update("ghcr.io/org/app:latest", current_labels)
+
+    assert result.current_version == "1.31.7-alpine-slim"
+    assert result.latest_version == "1.32.0-alpine-slim"
+
+
+def test_check_for_update_ignores_flavored_label_of_base_image() -> None:
+    # e.g. an app built on nginx:1.31.7-alpine-slim, inheriting its version label.
+    current_labels = {"org.opencontainers.image.version": "1.31.7-alpine-slim"}
+    with (
+        patch("releaseprobe.check.fetch_labels", return_value={}),
+        patch("releaseprobe.check.list_tags", return_value=["2.0.0", "2.1.0", "latest"]),
+    ):
+        with pytest.raises(UnknownVersionError):
+            check_for_update("ghcr.io/org/app:latest", current_labels)
+
+
+def test_check_for_update_pinned_flavored_tag() -> None:
+    with (
+        patch("releaseprobe.check.fetch_labels", return_value={}),
+        patch(
+            "releaseprobe.check.list_tags", return_value=["1.2.0-alpine", "1.3.0-alpine", "1.4.0"]
+        ),
+    ):
+        result = check_for_update("docker.io/org/app:1.2.0-alpine")
+
+    assert result.current_version == "1.2.0-alpine"
+    assert result.latest_version == "1.3.0-alpine"
+
+
 def test_check_for_update_resolves_floating_tag_by_digest() -> None:
     current_labels = {"org.opencontainers.image.version": "24.04"}
     digests = {"0.40.5": "sha256:new", "0.40.4": "sha256:old", "0.40.3": "sha256:older"}

@@ -8,6 +8,7 @@ the spec. Only public/anonymous access is supported for now.
 
 from __future__ import annotations
 
+import email.utils
 import json
 import logging
 import re
@@ -15,6 +16,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Iterator
 from dataclasses import dataclass
 from email.message import Message
 from typing import Any
@@ -28,6 +30,16 @@ _TIMEOUT = 10
 # occasionally drop connections when a repository with thousands of tags is
 # paged through, and a single dropped request shouldn't fail the whole check.
 _RETRY_DELAYS = (1.0, 2.0)
+# Delays before each retry of a rate-limited (HTTP 429) request, unless the
+# registry asks for a specific wait with `Retry-After` (capped at
+# `_MAX_RETRY_AFTER`, so a check never hangs for minutes).
+_RATE_LIMIT_DELAYS = (2.0, 5.0, 10.0)
+_MAX_RETRY_AFTER = 30.0
+# Tags to request per page. GHCR returns only 100 by default and its
+# next-page links carry `n=0`, which makes paging through repositories with
+# thousands of tags (e.g. immich's `commit-*` tags) take dozens of requests -
+# enough to run into its rate limit. GHCR and Docker Hub cap this at 1000.
+_TAGS_PAGE_SIZE = 1000
 
 _logger = logging.getLogger(__name__)
 
@@ -74,8 +86,37 @@ class _Response:
 def _get(
     url: str, headers: dict[str, str], logger: logging.Logger, *, method: str = "GET"
 ) -> _Response:
+    """Send a request, retrying network errors and rate limiting (HTTP 429)."""
+    network_delays = iter(_RETRY_DELAYS)
+    rate_limit_delays = iter(_RATE_LIMIT_DELAYS)
+    attempts = 0
+    while True:
+        attempts += 1
+        response = _send(url, headers, logger, method=method, delays=network_delays)
+        if response.status != 429:
+            return response
+        delay = next(rate_limit_delays, None)
+        if delay is None:
+            logger.warning("%s is still rate limited after %d attempt(s)", url, attempts)
+            return response
+        delay = _retry_after(response.headers.get("Retry-After"), default=delay)
+        logger.info("%s is rate limited (HTTP 429), retrying in %.0fs", url, delay)
+        time.sleep(delay)
+
+
+def _send(
+    url: str,
+    headers: dict[str, str],
+    logger: logging.Logger,
+    *,
+    method: str,
+    delays: Iterator[float],
+) -> _Response:
+    """Send one request, retrying network-level failures with the given delays."""
     request = urllib.request.Request(url, headers=headers, method=method)
-    for attempt, delay in enumerate((*_RETRY_DELAYS, None)):
+    attempts = 0
+    while True:
+        attempts += 1
         logger.debug("%s %s", method, url)
         try:
             with urllib.request.urlopen(request, timeout=_TIMEOUT) as response:  # noqa: S310
@@ -84,14 +125,27 @@ def _get(
             return _Response(exc.code, exc.headers, exc.read())
         except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
             reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+            delay = next(delays, None)
             if delay is None:
-                logger.warning(
-                    "could not reach %s after %d attempt(s): %s", url, attempt + 1, reason
-                )
+                logger.warning("could not reach %s after %d attempt(s): %s", url, attempts, reason)
                 raise RegistryError(f"could not reach {url}: {reason}") from exc
             logger.debug("could not reach %s (%s), retrying in %.0fs", url, reason, delay)
             time.sleep(delay)
-    raise AssertionError("unreachable")
+
+
+def _retry_after(value: str | None, *, default: float) -> float:
+    """Seconds to wait per a `Retry-After` header (seconds or HTTP date), capped."""
+    if not value:
+        return default
+    try:
+        seconds = float(value)
+    except ValueError:
+        try:
+            when = email.utils.parsedate_to_datetime(value)
+        except (TypeError, ValueError):
+            return default
+        seconds = when.timestamp() - time.time()
+    return min(max(seconds, 0.0), _MAX_RETRY_AFTER)
 
 
 def _auth_params(www_authenticate: str) -> dict[str, str]:
@@ -151,16 +205,31 @@ def list_tags(ref: ImageReference, logger: logging.Logger | None = None) -> list
     log.info("listing tags for %s/%s", ref.registry, ref.repository)
     tags: list[str] = []
     auth: dict[str, str] = {}
-    url: str | None = f"https://{ref.registry}/v2/{ref.repository}/tags/list"
+    url: str | None = _with_page_size(f"https://{ref.registry}/v2/{ref.repository}/tags/list")
     while url:
         response = _get_with_auth(url, auth=auth, logger=log)
         data = json.loads(response.body)
         tags.extend(data.get("tags") or [])
         url = next_page_url(response.headers.get("Link"), url)
         if url:
+            url = _with_page_size(url)
             log.debug("following pagination link to %s", url)
     log.debug("found %d tag(s) for %s/%s", len(tags), ref.registry, ref.repository)
     return tags
+
+
+def _with_page_size(url: str) -> str:
+    """Set the `n` (page size) query parameter, unless the URL already has a usable one.
+
+    GHCR's next-page links say `n=0`, which it treats as its small default.
+    """
+    parts = urllib.parse.urlsplit(url)
+    query = urllib.parse.parse_qsl(parts.query, keep_blank_values=True)
+    if any(key == "n" and value not in ("", "0") for key, value in query):
+        return url
+    query = [(key, value) for key, value in query if key != "n"]
+    query.append(("n", str(_TAGS_PAGE_SIZE)))
+    return urllib.parse.urlunsplit(parts._replace(query=urllib.parse.urlencode(query)))
 
 
 def _select_platform_manifest(

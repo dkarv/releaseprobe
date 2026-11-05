@@ -52,9 +52,7 @@ def test_fetch_release_notes_filters_to_version_range() -> None:
         return FakeResponse(json.dumps(releases).encode())
 
     with patch("urllib.request.urlopen", side_effect=fake_urlopen):
-        notes = fetch_release_notes(
-            "https://github.com/org/app", current="1.0.0", latest="1.2.0"
-        )
+        notes = fetch_release_notes("https://github.com/org/app", current="1.0.0", latest="1.2.0")
 
     assert [n.version for n in notes] == ["v1.1.0", "v1.2.0"]
     assert notes[0].body == "one"
@@ -111,9 +109,7 @@ def test_fetch_release_notes_follows_pagination() -> None:
         raise AssertionError(f"unexpected URL {request.full_url}")
 
     with patch("urllib.request.urlopen", side_effect=fake_urlopen):
-        notes = fetch_release_notes(
-            "https://github.com/org/app", current="1.0.0", latest="1.2.0"
-        )
+        notes = fetch_release_notes("https://github.com/org/app", current="1.0.0", latest="1.2.0")
 
     assert [n.version for n in notes] == ["v1.1.0", "v1.2.0"]
 
@@ -137,9 +133,7 @@ def test_fetch_release_notes_stops_paging_at_current_version() -> None:
         raise AssertionError(f"unexpected URL {request.full_url}")
 
     with patch("urllib.request.urlopen", side_effect=fake_urlopen):
-        notes = fetch_release_notes(
-            "https://github.com/org/app", current="1.0.0", latest="1.2.0"
-        )
+        notes = fetch_release_notes("https://github.com/org/app", current="1.0.0", latest="1.2.0")
 
     assert calls == [page_one]
     assert [n.version for n in notes] == ["v1.1.0", "v1.2.0"]
@@ -160,8 +154,6 @@ def test_fetch_release_notes_keeps_fetched_releases_on_page_limit() -> None:
         raise AssertionError(f"unexpected URL {request.full_url}")
 
     with patch("urllib.request.urlopen", side_effect=fake_urlopen):
-        notes = fetch_release_notes(
-            "https://github.com/org/app", current="1.0.0", latest="1.2.0"
-        )
+        notes = fetch_release_notes("https://github.com/org/app", current="1.0.0", latest="1.2.0")
 
     assert [n.version for n in notes] == ["v1.2.0"]
